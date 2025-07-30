@@ -161,6 +161,15 @@ export default function App() {
 
       {/* Sidebar */}
       <aside className={`sidebar ${showSidebar ? 'show' : ''}`}>
+        {/* Dark/Light Mode Toggle */}
+        <button 
+          onClick={() => setDarkMode(!darkMode)} 
+          className="theme-toggle"
+        >
+          {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+          {darkMode ? ' Light Mode' : ' Dark Mode'}
+        </button>
+
         <nav className="nav-links">
           <NavLink 
             icon={<Home size={18} />} 
