@@ -1,431 +1,536 @@
-import { useEffect, useState, useRef } from "react";
-import {
-  Bell, User, ChevronDown, LogOut, Settings,
-  Wifi, BarChart2, HelpCircle, Smartphone, Home,
-  Moon, Sun, Mail, Menu, X, Twitter
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { 
+  Wifi, 
+  Clock, 
+  Download, 
+  Upload, 
+  User, 
+  CreditCard, 
+  RefreshCw,
+  AlertCircle,
+  CheckCircle,
+  XCircle,
+  LogOut
 } from "lucide-react";
-import "./App.css";
+
 
 export default function App() {
-  const [userData, setUserData] = useState({
+  // User session state
+  const [sessionData, setSessionData] = useState({
     username: '',
     ip: '',
     mac: '',
+    bytesIn: 0,
+    bytesOut: 0,
     uptime: '',
+    idleTime: '',
     sessionTimeLeft: '',
-    bytesOut: '',
+    planName: '',
+    planSpeed: '',
+    planExpiry: '',
+    isActive: false,
+    error: null
   });
-  const [showProfileMenu, setShowProfileMenu] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [mpesaNumber, setMpesaNumber] = useState('');
-  const [selectedPlan, setSelectedPlan] = useState(null);
+
+  // UI state
   const [isLoading, setIsLoading] = useState(true);
-  const [darkMode, setDarkMode] = useState(false);
-  const [showSidebar, setShowSidebar] = useState(false);
-  const [showMainMenu, setShowMainMenu] = useState(false);
-  const [activeSection, setActiveSection] = useState('dashboard');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedPackage, setSelectedPackage] = useState(null);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
-  const profileMenuRef = useRef(null);
-  const notificationsMenuRef = useRef(null);
+  // Mock packages for M-Pesa integration
+  const packages = [
+    { id: 1, name: "1 Hour", price: 50, speed: "5 Mbps", validity: "1 hour" },
+    { id: 2, name: "6 Hours", price: 200, speed: "5 Mbps", validity: "6 hours" },
+    { id: 3, name: "24 Hours", price: 500, speed: "10 Mbps", validity: "24 hours" },
+    { id: 4, name: "7 Days", price: 2500, speed: "15 Mbps", validity: "7 days" },
+    { id: 5, name: "30 Days", price: 8000, speed: "20 Mbps", validity: "30 days" }
+  ];
 
-  useEffect(() => {
-    const getQueryParam = (param) => {
-      const urlParams = new URLSearchParams(window.location.search);
-      return urlParams.get(param) || '';
-    };
-
-    const fields = ['username', 'ip', 'mac', 'uptime', 'sessionTimeLeft', 'bytesOut'];
-    const data = {};
-    fields.forEach(field => {
-      data[field] = getQueryParam(field);
-    });
-    setUserData(data);
-
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }, [darkMode]);
-
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) {
-        setShowProfileMenu(false);
-      }
-      if (notificationsMenuRef.current && !notificationsMenuRef.current.contains(event.target)) {
-        setShowNotifications(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, []);
-
-  const handlePlanSelection = (plan) => {
-    setSelectedPlan(plan);
-    const number = prompt(`Enter your M-Pesa number to buy:\n\n${plan.name} for ${plan.price}`, mpesaNumber);
-    if (!number || number.length < 10) return alert("Invalid number.");
-
-    setMpesaNumber(number);
-    alert(`Sending STK push to ${number} for ${plan.name} - ${plan.price}`);
+  // Format bytes to human readable
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const toggleMainMenu = () => {
-    setShowMainMenu(!showMainMenu);
+  // Format time string
+  const formatTime = (timeStr) => {
+    if (!timeStr) return '0h 0m';
+    const regex = /(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/;
+    const match = timeStr.match(regex);
+    if (!match) return timeStr;
+    
+    const [, days, hours, minutes, seconds] = match.map(x => parseInt(x) || 0);
+    const parts = [];
+    if (days) parts.push(`${days}d`);
+    if (hours) parts.push(`${hours}h`);
+    if (minutes) parts.push(`${minutes}m`);
+    if (seconds) parts.push(`${seconds}s`);
+    
+    return parts.join(' ') || '0h 0m';
+  };
+
+  // Parse session time left to seconds
+  const parseTimeLeft = (timeStr) => {
+    if (!timeStr) return 0;
+    const regex = /(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/;
+    const match = timeStr.match(regex);
+    if (!match) return 0;
+    
+    const [, days, hours, minutes, seconds] = match.map(x => parseInt(x) || 0);
+    return (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds;
+  };
+
+  // Fetch session data from MikroTik
+  const fetchSessionData = async () => {
+    try {
+      setIsRefreshing(true);
+      
+      // Get current user session from MikroTik
+      const response = await fetch('http://localhost:5000/api/current-session');
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      
+      setSessionData({
+        username: data.username || 'Guest',
+        ip: data.address || 'N/A',
+        mac: data['mac-address'] || 'N/A',
+        bytesIn: parseInt(data['bytes-in'] || 0),
+        bytesOut: parseInt(data['bytes-out'] || 0),
+        uptime: formatTime(data.uptime || ''),
+        idleTime: formatTime(data['idle-time'] || ''),
+        sessionTimeLeft: data['session-time-left'] || '',
+        planName: data.profile || 'Default',
+        planSpeed: data['rate-limit'] || 'Unlimited',
+        planExpiry: data['limit-uptime'] || '',
+        isActive: true,
+        error: null
+      });
+      
+    } catch (error) {
+      console.error('Failed to fetch session data:', error);
+      setSessionData(prev => ({
+        ...prev,
+        error: error.message,
+        isActive: false
+      }));
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  };
+
+  // Handle M-Pesa payment
+  const handlePayment = async (packageId) => {
+    try {
+      const pkg = packages.find(p => p.id === packageId);
+      if (!pkg) return;
+      
+      setSelectedPackage(pkg);
+      setShowPaymentModal(true);
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Payment failed: ' + error.message);
+    }
+  };
+
+  // Process M-Pesa payment
+  const processMpesaPayment = async () => {
+    if (!phoneNumber || phoneNumber.length < 10) {
+      alert('Please enter a valid phone number');
+      return;
+    }
+
+    if (!selectedPackage) {
+      alert('No package selected');
+      return;
+    }
+
+    try {
+      setIsProcessingPayment(true);
+      
+      // Initiate M-Pesa payment
+      const response = await fetch('http://localhost:5000/api/initiate-payment', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          packageId: selectedPackage.id,
+          amount: selectedPackage.price,
+          phoneNumber: phoneNumber,
+          packageName: selectedPackage.name,
+          username: sessionData.username
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        alert('STK push sent! Please check your phone and enter M-Pesa PIN to complete payment.');
+        setShowPaymentModal(false);
+        setPhoneNumber('');
+        setSelectedPackage(null);
+      } else {
+        throw new Error(data.error || 'Payment initiation failed');
+      }
+      
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Payment failed: ' + error.message);
+    } finally {
+      setIsProcessingPayment(false);
+    }
+  };
+
+  // Handle logout
+  const handleLogout = async () => {
+    try {
+      await fetch('http://localhost:5000/api/logout', {
+        method: 'POST',
+        credentials: 'include'
+      });
+      localStorage.clear();
+      sessionStorage.clear();
+      window.location.href = 'http://192.168.88.1/logout';
+    } catch (error) {
+      console.error("Logout failed:", error);
+      window.location.href = 'http://192.168.88.1/login';
+    }
+  };
+
+  // Auto-refresh session data
+  useEffect(() => {
+    fetchSessionData();
+    
+    // Refresh every 30 seconds
+    const interval = setInterval(fetchSessionData, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  // Countdown timer for session time left
+  const [timeLeft, setTimeLeft] = useState(0);
+  
+  useEffect(() => {
+    const initialTime = parseTimeLeft(sessionData.sessionTimeLeft);
+    setTimeLeft(initialTime);
+    
+    const timer = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 0) return 0;
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, [sessionData.sessionTimeLeft]);
+
+  // Format countdown
+  const formatCountdown = (seconds) => {
+    if (seconds <= 0) return 'Expired';
+    
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
   if (isLoading) {
     return (
-      <div className="loading-screen">
-        <div className="loading-spinner"></div>
-        <h2>Loading WiFi Dashboard...</h2>
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading your session...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="app-container">
-      {/* Top Navigation */}
-      <header className="topbar">
-        <h1 className="logo">📶 WiFiPay</h1>
-        
-        <div className="right-menu">
-          <div ref={notificationsMenuRef}>
-            <button 
-              onClick={() => setShowNotifications(!showNotifications)} 
-              className="icon-btn"
+    
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b">
+        <div className="w-full px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <Wifi className="h-8 w-8 text-blue-600" />
+            <h1 className="text-2xl font-bold text-gray-900">FortuNet</h1>
+          </div>
+          
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={fetchSessionData}
+              disabled={isRefreshing}
+              className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-600 hover:text-blue-600 transition-colors"
             >
-              <Bell size={20} />
-              <span className="badge">3</span>
+              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
             </button>
-            {showNotifications && (
-              <div className="dropdown">
-                <p>⚠️ Plan expires in 3 days</p>
-                <p>📶 80% data used</p>
-                <p>🔧 Maintenance tonight</p>
-                <button 
-                  className="close-dropdown-btn" 
-                  onClick={() => setShowNotifications(false)}
-                >
-                  Close
-                </button>
-              </div>
-            )}
+            
+            <Link 
+              to="/admin" 
+              className="text-sm text-gray-500 hover:text-blue-600 transition-colors"
+            >
+              Admin Panel
+            </Link>
+
+            <button
+              onClick={() => setShowLogoutModal(true)}
+              className="flex items-center space-x-2 px-3 py-2 text-sm text-red-600 hover:text-red-700 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>Logout</span>
+            </button>
           </div>
-          <div 
-            className="profile" 
-            onClick={() => setShowProfileMenu(!showProfileMenu)}
-            ref={profileMenuRef}
-          >
-            <img
-              src={`https://ui-avatars.com/api/?name=${userData.username || 'Guest'}&background=0D8ABC&color=fff`}
-              alt="User Avatar"
-              className="avatar"
-            />
-            <span>{userData.username || 'Guest'}</span>
-            <ChevronDown size={16} />
-          </div>
-          {showProfileMenu && (
-            <div className="dropdown profile-menu">
-              <a href="#profile">Profile Settings</a>
-              <a href="#changepw">Change Password</a>
-              <a href="#payments">Payment History</a>
-              <button 
-                className="close-dropdown-btn" 
-                onClick={() => setShowProfileMenu(false)}
-              >
-                Close
-              </button>
-            </div>
-          )}
         </div>
       </header>
 
-      {/* Sidebar Toggle Button */}
-      <button 
-        className="sidebar-toggle"
-        onClick={() => setShowSidebar(!showSidebar)}
-      >
-        {showSidebar ? <X size={24} /> : <Menu size={24} />}
-        <span>Menu</span>
-      </button>
-
-      {/* Sidebar */}
-      <aside className={`sidebar ${showSidebar ? 'show' : ''}`}>
-        {/* Dark/Light Mode Toggle */}
-        <button 
-          onClick={() => setDarkMode(!darkMode)} 
-          className="theme-toggle"
-        >
-          {darkMode ? <Sun size={16} /> : <Moon size={16} />}
-          {darkMode ? ' Light Mode' : ' Dark Mode'}
-        </button>
-
-        <nav className="nav-links">
-          <NavLink 
-            icon={<Home size={18} />} 
-            text="Dashboard Home" 
-            active={activeSection === 'dashboard'}
-            onClick={() => {
-              setActiveSection('dashboard');
-              setShowSidebar(false);
-            }}
-          />
-          <NavLink 
-            icon={<BarChart2 size={18} />} 
-            text="Data Usage" 
-            active={activeSection === 'usage'}
-            onClick={() => {
-              setActiveSection('usage');
-              setShowSidebar(false);
-            }}
-          />
-          
-          {/* Plans Link */}
-          <NavLink 
-            icon={<Wifi size={18} />} 
-            text="Plans" 
-            active={activeSection === 'plans'}
-            onClick={() => {
-              setActiveSection('plans');
-              setShowMainMenu(true);
-              setShowSidebar(false);
-            }}
-          />
-          
-          {/* Devices Link */}
-          <NavLink 
-            icon={<Smartphone size={18} />} 
-            text="Devices" 
-            active={activeSection === 'devices'}
-            onClick={() => {
-              setActiveSection('devices');
-              setShowMainMenu(true);
-              setShowSidebar(false);
-            }}
-          />
-          
-          <NavLink 
-            icon={<HelpCircle size={18} />} 
-            text="Support" 
-            active={activeSection === 'support'}
-            onClick={() => {
-              setActiveSection('support');
-              setShowSidebar(false);
-            }}
-          />
-        </nav>
-        <div className="sidebar-footer">
-          <div className="balance">Balance: 6.8 GB</div>
-          <button className="logout-btn" onClick={() => window.location.href = '/logout'}>
-            <LogOut size={16} className="mr-1" /> Logout
-          </button>
-        </div>
-      </aside>
-
-      <div className="main-content">
-        {/* Main Menu Dropdown */}
-        {showMainMenu && (
-          <div className="main-menu-dropdown">
-            <div className="main-menu-content">
-              {activeSection === 'plans' && (
-                <>
-                  <h3>📡 Select a Plan</h3>
-                  <PlanCategory 
-                    title="📅 Monthly Plans" 
-                    plans={[
-                      { name: "1 Mbps", price: "Ksh 300" },
-                      { name: "2 Mbps", price: "Ksh 500" },
-                      { name: "5 Mbps", price: "Ksh 900" },
-                      { name: "10 Mbps", price: "Ksh 1500" },
-                      { name: "20 Mbps", price: "Ksh 2500" },
-                    ]} 
-                    onSelect={handlePlanSelection} 
-                  />
-                  <PlanCategory 
-                    title="🗓️ 7-Day Bundles" 
-                    plans={[
-                      { name: "10 GB", price: "Ksh 150" },
-                      { name: "20 GB", price: "Ksh 250" },
-                      { name: "40 GB", price: "Ksh 450" },
-                    ]} 
-                    onSelect={handlePlanSelection} 
-                  />
-                  <PlanCategory 
-                    title="⏱️ Daily / Hourly Access" 
-                    plans={[
-                      { name: "24 Hours Unlimited", price: "Ksh 100" },
-                      { name: "12 Hours Unlimited", price: "Ksh 50" },
-                      { name: "6 Hours Unlimited", price: "Ksh 30" },
-                      { name: "1 Hour Unlimited", price: "Ksh 20" },
-                    ]} 
-                    onSelect={handlePlanSelection} 
-                  />
-                </>
-              )}
-              {activeSection === 'devices' && (
-                <>
-                  <h3>📱 Connected Devices</h3>
-                  <div className="devices-grid">
-                    <div className="device-card">
-                      <div className="device-info">
-                        <div className="device-icon">📱</div>
-                        <div>
-                          <p className="device-name">iPhone 13 Pro</p>
-                          <p className="device-mac">MAC: 00:1A:2B:3C:4D:5E</p>
-                          <p className="device-ip">IP: 192.168.1.5</p>
-                        </div>
-                      </div>
-                      <div className="device-status">
-                        <span className="active">Active</span>
-                        <span className="connection-time">Connected: 2h 15m</span>
-                      </div>
-                    </div>
-                    <div className="device-card">
-                      <div className="device-info">
-                        <div className="device-icon">💻</div>
-                        <div>
-                          <p className="device-name">MacBook Pro</p>
-                          <p className="device-mac">MAC: 00:1A:2B:3C:4D:5F</p>
-                          <p className="device-ip">IP: 192.168.1.6</p>
-                        </div>
-                      </div>
-                      <div className="device-status">
-                        <span className="active">Active</span>
-                        <span className="connection-time">Connected: 1h 30m</span>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-              <button 
-                className="close-main-menu-btn" 
-                onClick={() => setShowMainMenu(false)}
-              >
-                Close Menu
-              </button>
+      {/* Main Content */}
+      <main className="w-full px-4 py-8">
+        {/* Error Banner */}
+        {sessionData.error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <div className="flex items-center space-x-2">
+              <AlertCircle className="h-5 w-5 text-red-500" />
+              <p className="text-red-700">{sessionData.error}</p>
             </div>
           </div>
         )}
 
-        <main>
-          {activeSection === 'dashboard' && (
-            <>
-              <section className="section welcome-card">
-                <h2>Welcome back, {userData.username || 'Guest'}!</h2>
-                <p>Active Plan: 10GB Monthly (Expires: Aug 15, 2025)</p>
-              </section>
-
-              <section id="usage" className="section">
-                <h3>📊 Usage Summary</h3>
-                <div className="grid-2">
-                  <DataRow label="MAC Address" value={userData.mac} />
-                  <DataRow label="Uptime" value={userData.uptime} />
-                  <DataRow label="Time Left" value={userData.sessionTimeLeft} />
-                  <DataRow label="Data Used (Bytes Out)" value={userData.bytesOut} />
-                </div>
-              </section>
-            </>
-          )}
-
-          {activeSection === 'usage' && (
-            <section className="section">
-              <h3>📊 Detailed Usage Statistics</h3>
-              <div className="data-row">
-                <span>Data Used Today:</span>
-                <span>1.2 GB</span>
-              </div>
-              <div className="data-row">
-                <span>Data Remaining:</span>
-                <span>8.8 GB</span>
-              </div>
-              <div className="data-row">
-                <span>Daily Average:</span>
-                <span>0.4 GB</span>
-              </div>
-              <div className="data-row">
-                <span>Peak Usage Time:</span>
-                <span>8:00 PM - 10:00 PM</span>
-              </div>
-            </section>
-          )}
-
-          {activeSection === 'support' && (
-            <section id="support" className="section">
-              <h3>📞 Contact Support</h3>
-              <div className="contact-cards">
-                <a href="mailto:support@d3athshottwifi.com" className="contact-card">
-                  <Mail size={24} />
-                  <span>Email Support</span>
-                </a>
-                <a href="https://wa.me/254729909387" target="_blank" rel="noopener noreferrer" className="contact-card">
-                  <img src="https://cdn-icons-png.flaticon.com/512/3670/3670051.png" alt="WhatsApp" width={24} />
-                  <span>WhatsApp</span>
-                </a>
-                <a href="https://twitter.com/yourhandle" target="_blank" rel="noopener noreferrer" className="contact-card">
-                  <Twitter size={24} />
-                  <span>Twitter</span>
-                </a>
-              </div>
-            </section>
-          )}
-        </main>
-
-        <footer className="footer">
-          <p>© {new Date().getFullYear()} EcolandAttic Wireless. Powered by MikroTik RouterOS</p>
-        </footer>
-      </div>
-    </div>
-  );
-}
-
-function DataRow({ label, value }) {
-  return (
-    <div className="data-row">
-      <span>{label}:</span>
-      <span>{value || '—'}</span>
-    </div>
-  );
-}
-
-function PlanCategory({ title, plans, onSelect }) {
-  return (
-    <div className="plan-category">
-      <h4>{title}</h4>
-      <div className="plan-grid">
-        {plans.map((plan, i) => (
-          <div
-            key={i}
-            className={`plan-card ${i === 0 ? 'featured' : ''}`}
-            onClick={() => onSelect(plan)}
-          >
-            <p className="plan-name">{plan.name}</p>
-            <p className="plan-price">{plan.price}</p>
-            <button className="btn-primary">Buy Now</button>
+        {/* Session Status Card */}
+        <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">Session Status</h2>
+            <div className="flex items-center space-x-2">
+              {sessionData.isActive ? (
+                <CheckCircle className="h-5 w-5 text-green-500" />
+              ) : (
+                <XCircle className="h-5 w-5 text-red-500" />
+              )}
+              <span className={`text-sm font-medium ${
+                sessionData.isActive ? 'text-green-600' : 'text-red-600'
+              }`}>
+                {sessionData.isActive ? 'Active' : 'Inactive'}
+              </span>
+            </div>
           </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
-function NavLink({ icon, text, active, onClick }) {
-  return (
-    <button 
-      className={`nav-link ${active ? 'active' : ''}`}
-      onClick={onClick}
-    >
-      {icon}
-      <span>{text}</span>
-    </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
+              <User className="h-5 w-5 text-gray-500" />
+              <div>
+                <p className="text-sm text-gray-500">Username</p>
+                <p className="font-medium text-gray-900">{sessionData.username}</p>
+              </div>
+            </div>
+            
+            <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
+              <Wifi className="h-5 w-5 text-gray-500" />
+              <div>
+                <p className="text-sm text-gray-500">IP Address</p>
+                <p className="font-medium text-gray-900">{sessionData.ip}</p>
+              </div>
+            </div>
+            
+            <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
+              <Clock className="h-5 w-5 text-gray-500" />
+              <div>
+                <p className="text-sm text-gray-500">Uptime</p>
+                <p className="font-medium text-gray-900">{sessionData.uptime}</p>
+              </div>
+            </div>
+            
+            <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
+              <Clock className="h-5 w-5 text-gray-500" />
+              <div>
+                <p className="text-sm text-gray-500">Idle Time</p>
+                <p className="font-medium text-gray-900">{sessionData.idleTime}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Usage Statistics */}
+        <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">Usage Statistics</h2>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            <div className="text-center p-4 bg-blue-50 rounded-lg">
+              <Download className="h-8 w-8 text-blue-600 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">Downloaded</p>
+              <p className="text-2xl font-bold text-blue-600">
+                {formatBytes(sessionData.bytesIn)}
+              </p>
+            </div>
+            
+            <div className="text-center p-4 bg-green-50 rounded-lg">
+              <Upload className="h-8 w-8 text-green-600 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">Uploaded</p>
+              <p className="text-2xl font-bold text-green-600">
+                {formatBytes(sessionData.bytesOut)}
+              </p>
+            </div>
+            
+            <div className="text-center p-4 bg-purple-50 rounded-lg">
+              <Clock className="h-8 w-8 text-purple-600 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">Time Remaining</p>
+              <p className="text-2xl font-bold text-purple-600">
+                {formatCountdown(timeLeft)}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Current Plan */}
+        <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">Current Plan</h2>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg text-white">
+              <p className="text-sm opacity-90">Plan Name</p>
+              <p className="text-xl font-bold">{sessionData.planName}</p>
+            </div>
+            
+            <div className="p-4 bg-gradient-to-r from-green-500 to-green-600 rounded-lg text-white">
+              <p className="text-sm opacity-90">Speed</p>
+              <p className="text-xl font-bold">{sessionData.planSpeed}</p>
+            </div>
+            
+            <div className="p-4 bg-gradient-to-r from-purple-500 to-purple-600 rounded-lg text-white">
+              <p className="text-sm opacity-90">Expires</p>
+              <p className="text-xl font-bold">{sessionData.planExpiry || 'Unlimited'}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Buy More Time */}
+        <div className="bg-white rounded-xl shadow-sm border p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-semibold text-gray-900">Buy More Time</h2>
+            <CreditCard className="h-6 w-6 text-blue-600" />
+          </div>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+            {packages.map((pkg) => (
+              <div key={pkg.id} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
+                <div className="text-center">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">{pkg.name}</h3>
+                  <p className="text-2xl font-bold text-blue-600 mb-2">KSh {pkg.price}</p>
+                  <p className="text-sm text-gray-500 mb-2">{pkg.speed}</p>
+                  <p className="text-xs text-gray-400 mb-4">{pkg.validity}</p>
+                  
+                  <button
+                    onClick={() => handlePayment(pkg.id)}
+                    className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                  >
+                    Buy Now
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </main>
+
+      {/* Payment Modal */}
+      {showPaymentModal && selectedPackage && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">Complete Payment</h3>
+            
+            <div className="mb-4">
+              <p className="text-gray-600 mb-2">Package: {selectedPackage.name}</p>
+              <p className="text-gray-600 mb-2">Amount: KSh {selectedPackage.price}</p>
+              <p className="text-gray-600 mb-4">Speed: {selectedPackage.speed}</p>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                M-Pesa Phone Number
+              </label>
+              <input
+                type="tel"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                placeholder="e.g., 0712345678"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Enter the phone number registered with M-Pesa
+              </p>
+            </div>
+            
+            <div className="flex space-x-3">
+              <button
+                onClick={() => {
+                  setShowPaymentModal(false);
+                  setPhoneNumber('');
+                  setSelectedPackage(null);
+                }}
+                className="flex-1 py-2 px-4 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={processMpesaPayment}
+                disabled={isProcessingPayment}
+                className="flex-1 py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {isProcessingPayment ? 'Processing...' : 'Pay with M-Pesa'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="bg-white border-t mt-12">
+        <div className="w-full px-4 py-6 text-center text-gray-500">
+          <p>&copy; 2024 FortuNet. Powered by MikroTik Hotspot & M-Pesa.</p>
+        </div>
+      </footer>
+
+      {/* Logout Modal */}
+      {showLogoutModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full">
+            <h3 className="text-xl font-semibold text-gray-900 mb-4">Confirm Logout</h3>
+            <p className="text-gray-600 mb-6">Are you sure you want to logout from FortuNet?</p>
+            
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setShowLogoutModal(false)}
+                className="flex-1 py-2 px-4 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLogout}
+                className="flex-1 py-2 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
